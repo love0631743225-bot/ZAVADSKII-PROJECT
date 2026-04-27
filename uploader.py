@@ -160,5 +160,84 @@ class SheetsManager:
         self.sheet.update_cell(row, COL_YOUTUBE_ID, video_id)
 
 
-# ─── ДАЛЬШЕ ИДУТ: DriveManager, AdsPowerAPI, YouTubeUploader, MassUploadManager ──
-# (части 2, 3, 4 — будут добавлены следующими шагами)
+# ─── GOOGLE DRIVE ─────────────────────────────────────────────────────────────
+class DriveManager:
+    def __init__(self):
+        scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+        creds  = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        self.service = build("drive", "v3", credentials=creds)
+        os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
+        logger.info("✅ Google Drive подключён")
+
+    def extract_file_id(self, url: str) -> str:
+        if "/d/" in url:
+            return url.split("/d/")[1].split("/")[0]
+        if "id=" in url:
+            return url.split("id=")[1].split("&")[0]
+        return url
+
+    def download_video(self, url: str, filename: str) -> str:
+        # Если в колонке указано имя локального файла - просто берём с диска
+        if not url.startswith("http"):
+            local_path = os.path.join(LOCAL_VIDEOS_DIR, url)
+            if os.path.exists(local_path):
+                logger.info(f"  ✅ Используем локальный файл: {local_path}")
+                # Копируем во временную папку чтобы потом удалить копию
+                import shutil
+                dest_path = os.path.join(TEMP_VIDEO_DIR, filename)
+                shutil.copy(local_path, dest_path)
+                return dest_path
+            else:
+                raise FileNotFoundError(f"Локальный файл не найден: {local_path}")
+
+        # Иначе скачиваем с Google Drive (старая логика)
+        file_id   = self.extract_file_id(url)
+        dest_path = os.path.join(TEMP_VIDEO_DIR, filename)
+        logger.info(f"  Скачиваем с Drive: {file_id}")
+
+        request    = self.service.files().get_media(fileId=file_id)
+        fh         = io.FileIO(dest_path, "wb")
+        downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
+
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                logger.info(f"  Скачано: {int(status.progress() * 100)}%")
+        fh.close()
+        logger.info(f"  ✅ Видео скачано: {dest_path}")
+        return dest_path
+
+    def delete_video(self, path: str):
+        try:
+            os.remove(path)
+            logger.info(f"  🗑️ Удалён: {path}")
+        except Exception as e:
+            logger.warning(f"  Не удалось удалить {path}: {e}")
+
+
+# ─── ADSPOWER API ─────────────────────────────────────────────────────────────
+class AdsPowerAPI:
+    def _get(self, endpoint: str, params: dict = None) -> dict:
+        if params is None:
+            params = {}
+        params["api_key"] = ADSPOWER_API_KEY
+        resp = requests.get(f"{ADSPOWER_BASE_URL}{endpoint}", params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def open_browser(self, profile_id: str) -> dict:
+        data = self._get("/api/v1/browser/start", {"user_id": profile_id})
+        if data.get("code") != 0:
+            raise RuntimeError(f"AdsPower: {data.get('msg')}")
+        return data["data"]
+
+    def close_browser(self, profile_id: str):
+        try:
+            self._get("/api/v1/browser/stop", {"user_id": profile_id})
+        except Exception as e:
+            logger.warning(f"Закрытие профиля {profile_id}: {e}")
+
+
+# ─── ДАЛЬШЕ ИДУТ: YouTubeUploader, MassUploadManager ──
+# (части 3, 4 — будут добавлены следующими шагами)
