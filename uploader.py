@@ -66,7 +66,9 @@ COL_COUNTRY        = 8   # H
 COL_STATUS         = 9   # I
 COL_GOOGLE_ACCOUNT = 10  # J
 COL_CHANNEL_ID     = 11  # K
-COL_YOUTUBE_ID     = 12  # L  ← FIX: добавлена недостающая константа
+COL_YOUTUBE_ID     = 12  # L  ← FIX #1: добавлена недостающая константа
+COL_INTERNAL_STATUS = 13 # M  ← FIX #3: внутренний текстовый статус (state machine).
+                         #         Колонка I остаётся только цветной для пользователя.
 
 
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
@@ -93,8 +95,10 @@ class SheetsManager:
         rows  = self.sheet.get_all_values()
         tasks = []
         for i, row in enumerate(rows[1:], start=2):
-            status = self.get_cell(row, COL_STATUS)
-            if status == "":
+            # FIX #3: читаем state machine из скрытой колонки M, а не из I (цветной)
+            internal_status = self.get_cell(row, COL_INTERNAL_STATUS)
+            youtube_id      = self.get_cell(row, COL_YOUTUBE_ID)
+            if internal_status == "" and youtube_id == "":
                 profile_id = self.get_cell(row, COL_PROFILE_ID)
                 video_url  = self.get_cell(row, COL_VIDEO_URL)
                 if not profile_id or not video_url:
@@ -119,8 +123,9 @@ class SheetsManager:
         rows  = self.sheet.get_all_values()
         tasks = []
         for i, row in enumerate(rows[1:], start=2):
-            status = self.get_cell(row, COL_STATUS)
-            if status == "uploaded":
+            # FIX #3: читаем state machine из скрытой колонки M
+            internal_status = self.get_cell(row, COL_INTERNAL_STATUS)
+            if internal_status == "uploaded":
                 tasks.append({
                     "row":            i,
                     "profile_id":     self.get_cell(row, COL_PROFILE_ID),
@@ -153,7 +158,14 @@ class SheetsManager:
         except Exception as e:
             logger.warning(f"  Цвет не установлен: {e}")
 
-        logger.info(f"  Sheets строка {row} → {status} (цвет)")
+        # FIX #3: пишем текстовый статус в скрытую колонку M
+        # (колонка I остаётся только цветной, как ты хотел)
+        try:
+            self.sheet.update_cell(row, COL_INTERNAL_STATUS, status)
+        except Exception as e:
+            logger.warning(f"  Internal status не сохранён: {e}")
+
+        logger.info(f"  Sheets строка {row} → {status} (цвет + internal)")
 
     def set_video_id(self, row: int, video_id: str):
         """После загрузки сохраняем youtube_id в колонку L"""
@@ -179,7 +191,7 @@ class DriveManager:
     def download_video(self, url: str, filename: str) -> str:
         # Если в колонке указано имя локального файла - просто берём с диска
         if not url.startswith("http"):
-            local_path = os.path.join(LOCAL_VIDEOS_DIR, url)
+            local_path = os.path.join(VIDEOS_DIR, url)
             if os.path.exists(local_path):
                 logger.info(f"  ✅ Используем локальный файл: {local_path}")
                 # Копируем во временную папку чтобы потом удалить копию
@@ -625,8 +637,10 @@ class YouTubeUploader:
 
                 # Выбираем часовой пояс по стране из колонки H
                 try:
-                    country = task.get("country", "").strip().upper() if hasattr(self, "_task") else ""
-                    if not country and hasattr(self, "_country"):
+                    # FIX #5: убрана мёртвая ветка с локальной `task` (NameError при срабатывании).
+                    # Используем self._country, который проставляется в upload_all.
+                    country = ""
+                    if hasattr(self, "_country") and self._country:
                         country = self._country.strip().upper()
 
                     if country:
@@ -804,6 +818,42 @@ class YouTubeUploader:
                 logger.warning(f"  Проверка прогресса: {e}")
                 time.sleep(10)
 
+        # FIX #4: извлекаем реальный video_id из share-ссылки в диалоге.
+        # YouTube показывает ссылку "https://youtu.be/XXXXX" в диалоге загрузки.
+        video_id = ""
+        share_selectors = [
+            "a.from-input[href*='youtu.be']",
+            ".ytcp-video-info a[href*='youtu.be']",
+            "a[href*='youtu.be/']",
+            "span.ytcp-video-info",
+        ]
+        for sel in share_selectors:
+            try:
+                elem = self.driver.find_element(By.CSS_SELECTOR, sel)
+                href = elem.get_attribute("href") or ""
+                text = elem.text or ""
+                source = href if "youtu.be/" in href else text
+                if "youtu.be/" in source:
+                    video_id = source.split("youtu.be/")[-1].split("?")[0].strip()
+                    logger.info(f"  ✅ video_id извлечён ({sel}): {video_id}")
+                    break
+            except Exception:
+                continue
+
+        if not video_id:
+            # Fallback: ищем по тексту страницы
+            try:
+                import re as _re
+                match = _re.search(r"youtu\.be/([A-Za-z0-9_-]{11})", self.driver.page_source)
+                if match:
+                    video_id = match.group(1)
+                    logger.info(f"  ✅ video_id извлечён (regex): {video_id}")
+            except Exception:
+                pass
+
+        if not video_id:
+            logger.warning("  ⚠️ video_id не извлечён — публикация по расписанию не сработает")
+
         # Сохраняем
         try:
             save_btn = self.wait.until(
@@ -827,7 +877,8 @@ class YouTubeUploader:
             time.sleep(2)
 
             logger.info("  ✅ Сохранено!")
-            return "ok"
+            # FIX #4: возвращаем настоящий video_id, а не литерал "ok"
+            return video_id
         except Exception as e:
             logger.error(f"  Сохранение: {e}")
             return ""
@@ -909,13 +960,16 @@ class MassUploadManager:
             driver     = None
 
             try:
-                # 0. Сбрасываем цвет и очищаем K (youtube_id)
+                # 0. Сбрасываем цвет I, текст в I, youtube_id (L) и internal_status (M)
                 try:
                     row_num = task["row"]
                     self.sheets.sheet.format(f"I{row_num}", {
                         "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
                     })
                     self.sheets.sheet.update_cell(row_num, COL_STATUS, "")
+                    # FIX #3 + #4: чистим скрытые служебные колонки тоже
+                    self.sheets.sheet.update_cell(row_num, COL_YOUTUBE_ID, "")
+                    self.sheets.sheet.update_cell(row_num, COL_INTERNAL_STATUS, "")
                     logger.info(f"  Строка {row_num} сброшена")
                 except Exception:
                     pass
@@ -975,6 +1029,12 @@ class MassUploadManager:
                 if video_id:
                     logger.info("  ✅ Видео полностью загружено! Закроем профиль через 5 секунд...")
                     time.sleep(5)
+                    # FIX #4: сохраняем настоящий video_id в колонку L,
+                    # чтобы потом планировщик его нашёл
+                    try:
+                        self.sheets.set_video_id(task["row"], video_id)
+                    except Exception as e:
+                        logger.warning(f"  set_video_id: {e}")
                     self.sheets.set_status(task["row"], "uploaded")
                     try:
                         row_num = task["row"]
