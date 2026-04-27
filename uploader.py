@@ -50,7 +50,7 @@ CREDENTIALS_FILE  = r"C:\Users\BOT\Desktop\credentials.json"
 SPREADSHEET_NAME  = "YoutubeUploader"
 TEMP_VIDEO_DIR    = "C:\\temp_videos"
 VIDEOS_DIR        = r"C:\Users\Public\ВИДЕО"   # Общая папка для всех профилей Windows
-THUMBNAILS_DIR    = r"C:\Users\BOT\Desktop\thumbnails"  # Папка с превью на ПК
+THUMBNAILS_DIR    = r"C:\Users\Public\ПРЕВЬЮ"  # Общая папка для всех профилей Windows
 UPLOAD_DELAY      = 5
 MAX_RETRIES       = 3
 
