@@ -239,5 +239,118 @@ class AdsPowerAPI:
             logger.warning(f"Закрытие профиля {profile_id}: {e}")
 
 
-# ─── ДАЛЬШЕ ИДУТ: YouTubeUploader, MassUploadManager ──
-# (части 3, 4 — будут добавлены следующими шагами)
+# ─── YOUTUBE UPLOADER ────────────────────────────────────────────────────────
+class YouTubeUploader:
+    def __init__(self, driver: webdriver.Chrome):
+        self.driver = driver
+        self.wait   = WebDriverWait(driver, 60)
+
+    # ── Переключение аккаунта ──────────────────────────────────────────────
+    def switch_google_account(self, email: str):
+        """Переключиться на нужный Google аккаунт"""
+        if not email:
+            return
+        logger.info(f"  Переключаемся на аккаунт: {email}")
+        try:
+            self.driver.get("https://accounts.google.com/AccountChooser")
+            time.sleep(3)
+
+            # Ищем нужный аккаунт в списке
+            accounts = self.driver.find_elements(By.CSS_SELECTOR, "[data-email]")
+            for acc in accounts:
+                if acc.get_attribute("data-email") == email:
+                    acc.click()
+                    time.sleep(3)
+                    logger.info(f"  ✅ Аккаунт выбран: {email}")
+                    return
+
+            logger.warning(f"  Аккаунт {email} не найден в списке")
+        except Exception as e:
+            logger.warning(f"  Переключение аккаунта: {e}")
+
+    # ── Переключение канала ────────────────────────────────────────────────
+    def switch_channel(self, channel_id: str):
+        """Переключиться на нужный канал (основной или бренд)"""
+        if not channel_id:
+            return
+        logger.info(f"  Переключаемся на канал: {channel_id}")
+        try:
+            self.driver.get(f"https://studio.youtube.com/channel/{channel_id}")
+            time.sleep(6)
+
+            # Проверяем что страница загрузилась
+            current_url = self.driver.current_url
+            logger.info(f"  URL после переключения: {current_url}")
+
+            # Ждём появления элементов Studio
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#upload-icon, ytcp-icon-button, #avatar-btn"))
+                )
+            except Exception:
+                pass
+
+            time.sleep(3)
+            logger.info(f"  ✅ Канал выбран: {channel_id}")
+        except Exception as e:
+            logger.warning(f"  Переключение канала: {e}")
+
+    # ── Загрузка превью ──────────────────────────────────────────────────
+    def upload_thumbnail(self, thumbnail_path: str):
+        """Загрузить превью к видео"""
+        if not thumbnail_path or not os.path.exists(thumbnail_path):
+            return
+        try:
+            thumb_input = self.driver.find_element(
+                By.CSS_SELECTOR, "input[type='file'][accept*='image']"
+            )
+            thumb_input.send_keys(os.path.abspath(thumbnail_path))
+            logger.info(f"  ✅ Превью загружено: {thumbnail_path}")
+            time.sleep(3)
+        except Exception as e:
+            logger.warning(f"  Превью: {e}")
+
+    # ── Загрузка видео (полный метод будет в части 3b) ───────────────────
+    def upload_as_private(self, video_path: str, title: str, description: str, thumbnail_path: str = "", schedule_time: str = "") -> str:
+        """Загрузить видео как PRIVATE, вернуть video_id. ЗАГЛУШКА — будет заполнена в части 3b."""
+        raise NotImplementedError("upload_as_private: будет добавлено в части 3b")
+
+    # ── Публикация ────────────────────────────────────────────────────────
+    def publish_video(self, video_id: str, channel_id: str = ""):
+        """Сменить PRIVATE → PUBLIC"""
+        if channel_id:
+            url = f"https://studio.youtube.com/channel/{channel_id}/videos/upload?filter=%5B%5D&sort=dd"
+        else:
+            url = f"https://studio.youtube.com/video/{video_id}/edit"
+
+        self.driver.get(f"https://studio.youtube.com/video/{video_id}/edit")
+        time.sleep(4)
+
+        try:
+            visibility_btn = self.wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "[aria-label='Visibility']"))
+            )
+            visibility_btn.click()
+            time.sleep(2)
+
+            public_radio = self.wait.until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//tp-yt-paper-radio-button[@name='PUBLIC']")
+                )
+            )
+            public_radio.click()
+            time.sleep(1)
+
+            save_btn = self.wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "#save-button"))
+            )
+            save_btn.click()
+            time.sleep(3)
+            logger.info(f"  ✅ Опубликовано: {video_id}")
+
+        except Exception as e:
+            logger.error(f"  Ошибка публикации: {e}")
+            raise
+
+
+# ─── ДАЛЬШЕ ИДУТ: upload_as_private (3b), MassUploadManager (4) ──
