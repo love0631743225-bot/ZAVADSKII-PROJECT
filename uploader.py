@@ -870,4 +870,190 @@ class YouTubeUploader:
             raise
 
 
-# ─── ДАЛЬШЕ ИДУТ: upload_as_private (3b), MassUploadManager (4) ──
+# ─── ОСНОВНОЙ МЕНЕДЖЕР ───────────────────────────────────────────────────────
+class MassUploadManager:
+    def __init__(self):
+        self.adspower = AdsPowerAPI()
+        self.sheets   = SheetsManager()
+        self.drive    = DriveManager()
+
+    def _get_driver(self, profile_id: str) -> webdriver.Chrome:
+        """Открыть профиль AdsPower и вернуть Selenium драйвер"""
+        browser_data     = self.adspower.open_browser(profile_id)
+        logger.info(f"  AdsPower ответ: {json.dumps(browser_data, ensure_ascii=False)}")
+        selenium_address = browser_data.get("ws", {}).get("selenium", "")
+        webdriver_path   = browser_data.get("webdriver", "")
+        logger.info(f"  Selenium: {selenium_address}")
+        logger.info(f"  Webdriver: {webdriver_path}")
+        time.sleep(3)
+
+        from selenium.webdriver.chrome.service import Service
+
+        options = Options()
+        options.debugger_address = selenium_address
+
+        service = Service(executable_path=webdriver_path)
+        driver  = webdriver.Chrome(service=service, options=options)
+
+        driver.minimize_window()
+        return driver
+
+    # ── Режим 1: Загрузка ─────────────────────────────────────────────────
+    def upload_all(self):
+        tasks = self.sheets.get_pending_tasks()
+        logger.info(f"═══ ЗАГРУЗКА. Задач: {len(tasks)} ═══\n")
+
+        for i, task in enumerate(tasks, 1):
+            logger.info(f"[{i}/{len(tasks)}] {task['channel']}")
+            video_path = None
+            driver     = None
+
+            try:
+                # 0. Сбрасываем цвет и очищаем K (youtube_id)
+                try:
+                    row_num = task["row"]
+                    self.sheets.sheet.format(f"I{row_num}", {
+                        "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+                    })
+                    self.sheets.sheet.update_cell(row_num, COL_STATUS, "")
+                    logger.info(f"  Строка {row_num} сброшена")
+                except Exception:
+                    pass
+
+                # 1. Берём видео из локальной папки
+                video_url = task["video_url"].strip()
+                # Если это путь — используем его, иначе ищем в VIDEOS_DIR
+                if os.path.isabs(video_url):
+                    video_path = video_url
+                else:
+                    video_path = os.path.join(VIDEOS_DIR, video_url)
+
+                if not os.path.exists(video_path):
+                    raise FileNotFoundError(f"Видео не найдено: {video_path}")
+                logger.info(f"  ✅ Видео найдено: {video_path}")
+
+                # 1.5 Берём превью из локальной папки
+                thumbnail_path = ""
+                if task.get("thumbnail"):
+                    thumb_url = task["thumbnail"].strip()
+                    if os.path.isabs(thumb_url):
+                        thumbnail_path = thumb_url
+                    else:
+                        thumbnail_path = os.path.join(THUMBNAILS_DIR, thumb_url)
+
+                    if not os.path.exists(thumbnail_path):
+                        logger.warning(f"  Превью не найдено: {thumbnail_path}")
+                        thumbnail_path = ""
+                    else:
+                        logger.info(f"  ✅ Превью найдено: {thumbnail_path}")
+
+                # 2. Открываем профиль
+                driver = self._get_driver(task["profile_id"])
+                uploader = YouTubeUploader(driver)
+                uploader._thumbnail_path = thumbnail_path
+                uploader._country = task.get("country", "")
+                uploader.current_row = task["row"]
+                uploader.current_sheets = self.sheets
+
+                # 3. Переключаем аккаунт (если нужно)
+                if task["google_account"]:
+                    uploader.switch_google_account(task["google_account"])
+
+                # 4. Переключаем канал (если нужно)
+                if task["channel_id"]:
+                    uploader.switch_channel(task["channel_id"])
+                else:
+                    driver.get("https://studio.youtube.com")
+                    time.sleep(4)
+
+                # 5. Загружаем с расписанием
+                video_id = uploader.upload_as_private(
+                    video_path, task["title"], task["description"],
+                    schedule_time=task.get("upload_time", "")
+                )
+
+                if video_id:
+                    logger.info("  ✅ Видео полностью загружено! Закроем профиль через 5 секунд...")
+                    time.sleep(5)
+                    self.sheets.set_status(task["row"], "uploaded")
+                    try:
+                        row_num = task["row"]
+                        self.sheets.sheet.format(f"I{row_num}", {
+                            "backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.4}
+                        })
+                    except Exception:
+                        pass
+                    logger.info(f"✅ Загружено: {video_id}\n")
+                else:
+                    self.sheets.set_status(task["row"], "")
+                    logger.error(f"❌ video_id не получен\n")
+
+            except Exception as e:
+                import traceback
+                logger.error(f"❌ Ошибка: {e}")
+                logger.error(traceback.format_exc())
+                self.sheets.set_status(task["row"], "")
+
+            finally:
+                if driver:
+                    try: driver.quit()
+                    except: pass
+                self.adspower.close_browser(task["profile_id"])
+                # Видео не удаляем - это файлы пользователя
+                time.sleep(UPLOAD_DELAY)
+
+        logger.info("═══ Загрузка завершена ═══")
+
+    # ── Режим 2: Публикация по расписанию ─────────────────────────────────
+    def publish_scheduled(self):
+        logger.info("═══ ПЛАНИРОВЩИК запущен (проверка каждую минуту) ═══")
+
+        while True:
+            now   = datetime.now().strftime("%d.%m.%Y %H:%M")
+            tasks = self.sheets.get_uploaded_tasks()
+
+            for task in tasks:
+                if task["upload_time"] == now:
+                    logger.info(f"⏰ Публикуем: {task['channel']}")
+                    driver = None
+                    try:
+                        driver   = self._get_driver(task["profile_id"])
+                        uploader = YouTubeUploader(driver)
+
+                        if task["google_account"]:
+                            uploader.switch_google_account(task["google_account"])
+
+                        uploader.publish_video(task["video_id"], task["channel_id"])
+                        self.sheets.set_status(task["row"], "published")
+
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка: {e}")
+                        self.sheets.set_status(task["row"], "")
+
+                    finally:
+                        if driver:
+                            try: driver.quit()
+                            except: pass
+                        self.adspower.close_browser(task["profile_id"])
+
+            time.sleep(60)
+
+
+# ─── ЗАПУСК ──────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "upload"
+
+    manager = MassUploadManager()
+
+    if mode == "upload":
+        manager.upload_all()
+    elif mode == "publish":
+        manager.publish_scheduled()
+    elif mode == "both":
+        manager.upload_all()
+        manager.publish_scheduled()
+    else:
+        print("Использование:")
+        print("  python uploader.py upload   — загрузить все как PRIVATE")
+        print("  python uploader.py publish  — публиковать по расписанию")
+        print("  python uploader.py both     — загрузить + публиковать")
