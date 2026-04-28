@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 ADSPOWER_BASE_URL = "http://local.adspower.net:50326"
 ADSPOWER_API_KEY  = "a1826249fb936686a49c82524f89dc65008917e3c27de454"
 CREDENTIALS_FILE  = r"C:\Users\BOT\Desktop\credentials.json"
-SPREADSHEET_NAME  = "YoutubeUploader"
+SPREADSHEET_ID    = "1gdYKmoqOcFngEdVK1d6b4mRSGS9mjiHNTKO-u_L5ThY"  # из URL таблицы
 VIDEOS_DIR        = r"C:\Users\Public\VIDEO"    # Общая папка для всех профилей Windows
 THUMBNAILS_DIR    = r"C:\Users\Public\PREVIO"   # Общая папка для всех профилей Windows
 UPLOAD_DELAY      = 5
@@ -67,15 +67,13 @@ COL_CHANNEL_ID     = 11  # K
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 class SheetsManager:
     def __init__(self):
-        # Drive scope нужен gspread'у чтобы искать таблицу по имени через client.open(...)
-        # — это не про скачивание файлов, а про метаданные.
+        # Только Sheets — открываем таблицу по ID, поэтому Drive-scope не нужен.
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
         ]
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
         self.client = gspread.authorize(creds)
-        self.sheet  = self.client.open(SPREADSHEET_NAME).sheet1
+        self.sheet  = self.client.open_by_key(SPREADSHEET_ID).sheet1
         # Sheets API v4 для чтения background color (gspread это напрямую не отдаёт)
         self.sheets_api = build("sheets", "v4", credentials=creds, cache_discovery=False)
         logger.info("✅ Google Sheets подключён")
