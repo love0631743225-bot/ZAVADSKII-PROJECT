@@ -67,8 +67,11 @@ COL_CHANNEL_ID     = 11  # K
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 class SheetsManager:
     def __init__(self):
+        # Drive scope нужен gspread'у чтобы искать таблицу по имени через client.open(...)
+        # — это не про скачивание файлов, а про метаданные.
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
         ]
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
         self.client = gspread.authorize(creds)
