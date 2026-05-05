@@ -17,7 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 import requests
 
@@ -248,7 +248,7 @@ def fetch_internet_archive(query, media_type, limit, root, control=_NULL_CONTROL
             if not picked:
                 continue
 
-            file_url = IA_DOWNLOAD_URL.format(identifier=ident, filename=quote_plus(picked["name"]))
+            file_url = IA_DOWNLOAD_URL.format(identifier=ident, filename=quote(picked["name"]))
             ext = picked["name"].rsplit(".", 1)[-1]
             filename = f"{_safe_name(ident)}.{ext}"
             dest = os.path.join(folder, filename)
