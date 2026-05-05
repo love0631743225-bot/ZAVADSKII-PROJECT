@@ -377,10 +377,16 @@ WM_API = "https://commons.wikimedia.org/w/api.php"
 
 
 def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
+    # Wikimedia-видео CDN стабильно отдаёт 403 на upload.wikimedia.org для большинства видео-форматов,
+    # фолбэк через Special:FilePath тоже часто не помогает. Картинки оттуда работают нормально.
+    if media_type == "video":
+        logger.info("Wikimedia video '%s': пропуск (источник нестабилен для видео)", query)
+        return 0
+
     folder = root
     os.makedirs(folder, exist_ok=True)
 
-    file_kind = "video" if media_type == "video" else ("audio" if media_type == "audio" else "bitmap")
+    file_kind = "audio" if media_type == "audio" else "bitmap"
     search_params = {
         "action": "query", "format": "json", "list": "search",
         "srsearch": f"{query} filetype:{file_kind}",
@@ -489,6 +495,25 @@ def run(topics, media_types, sources, limit, root, workers, control=None, on_pro
 
 # ─── GUI (tkinter) ───────────────────────────────────────────────────────────
 
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".space_archiver_config.json")
+
+
+def _load_gui_config() -> dict:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_gui_config(data: dict) -> None:
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("Не получилось сохранить конфиг: %s", e)
+
+
 def launch_gui():
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
@@ -515,6 +540,7 @@ def launch_gui():
             self.worker = None
             self.log_queue = queue.Queue()
             self.total_saved = 0
+            self.gui_config = _load_gui_config()
 
             self._build_ui()
             handler = TextHandler(self.log_queue)
@@ -530,7 +556,7 @@ def launch_gui():
             params.pack(fill="x", **pad)
 
             ttk.Label(params, text="Ключевые слова (через запятую):").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-            self.keywords_var = tk.StringVar(value="apollo 13, voyager")
+            self.keywords_var = tk.StringVar(value="")
             ttk.Entry(params, textvariable=self.keywords_var, width=60).grid(row=0, column=1, columnspan=3, sticky="we", padx=6, pady=6)
 
             ttk.Label(params, text="Сколько материалов на тему:").grid(row=1, column=0, sticky="w", padx=6, pady=6)
@@ -545,7 +571,8 @@ def launch_gui():
             ttk.Radiobutton(mf, text="И то, и другое", variable=self.media_var, value="both").pack(side="left")
 
             ttk.Label(params, text="Папка для сохранения:").grid(row=2, column=0, sticky="w", padx=6, pady=6)
-            self.out_var = tk.StringVar(value=os.path.abspath("archive_db"))
+            saved_out = self.gui_config.get("output_dir") or os.path.abspath("archive_db")
+            self.out_var = tk.StringVar(value=saved_out)
             ttk.Entry(params, textvariable=self.out_var, width=50).grid(row=2, column=1, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Button(params, text="Обзор...", command=self._browse).grid(row=2, column=3, sticky="w", padx=6, pady=6)
             params.columnconfigure(1, weight=1)
@@ -586,6 +613,8 @@ def launch_gui():
             path = filedialog.askdirectory(initialdir=self.out_var.get() or ".")
             if path:
                 self.out_var.set(path)
+                self.gui_config["output_dir"] = path
+                _save_gui_config(self.gui_config)
 
         def _poll_log_queue(self):
             try:
@@ -622,6 +651,9 @@ def launch_gui():
 
             out = self.out_var.get().strip() or "archive_db"
             media = self._media_types()
+
+            self.gui_config["output_dir"] = out
+            _save_gui_config(self.gui_config)
 
             self.control = Control()
             self.total_saved = 0
