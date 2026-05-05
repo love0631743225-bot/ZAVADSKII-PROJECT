@@ -146,7 +146,7 @@ NASA_SEARCH_URL = "https://images-api.nasa.gov/search"
 
 
 def fetch_nasa(query, media_type, limit, root, control=_NULL_CONTROL):
-    folder = os.path.join(root, "nasa", media_type, _safe_name(query))
+    folder = root
     os.makedirs(folder, exist_ok=True)
 
     r = _http_get(NASA_SEARCH_URL, params={"q": query, "media_type": media_type, "api_key": NASA_API_KEY})
@@ -178,7 +178,7 @@ def fetch_nasa(query, media_type, limit, root, control=_NULL_CONTROL):
                 continue
 
             ext = target.rsplit(".", 1)[-1].split("?")[0]
-            filename = f"{_safe_name(nasa_id)}.{ext}"
+            filename = f"nasa_{_safe_name(nasa_id)}.{ext}"
             dest = os.path.join(folder, filename)
 
             if _download_file(target, dest):
@@ -204,7 +204,7 @@ IA_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 
 
 def fetch_internet_archive(query, media_type, limit, root, control=_NULL_CONTROL):
-    folder = os.path.join(root, "internet_archive", media_type, _safe_name(query))
+    folder = root
     os.makedirs(folder, exist_ok=True)
 
     ia_type = {"video": "movies", "audio": "audio", "image": "image"}.get(media_type, "movies")
@@ -250,7 +250,7 @@ def fetch_internet_archive(query, media_type, limit, root, control=_NULL_CONTROL
 
             file_url = IA_DOWNLOAD_URL.format(identifier=ident, filename=quote(picked["name"]))
             ext = picked["name"].rsplit(".", 1)[-1]
-            filename = f"{_safe_name(ident)}.{ext}"
+            filename = f"ia_{_safe_name(ident)}.{ext}"
             dest = os.path.join(folder, filename)
 
             if _download_file(file_url, dest):
@@ -275,7 +275,7 @@ LOC_SEARCH_URL = "https://www.loc.gov/search/"
 
 
 def fetch_loc(query, media_type, limit, root, control=_NULL_CONTROL):
-    folder = os.path.join(root, "loc", media_type, _safe_name(query))
+    folder = root
     os.makedirs(folder, exist_ok=True)
 
     fa_format = {"image": "online-format:image", "video": "online-format:film, video", "audio": "online-format:audio"}.get(media_type, "online-format:image")
@@ -311,7 +311,7 @@ def fetch_loc(query, media_type, limit, root, control=_NULL_CONTROL):
             if len(ext) > 5:
                 ext = "jpg" if media_type == "image" else "mp4"
             ident = item.get("id") or item.get("url", "")
-            filename = f"{_safe_name(ident)}.{ext}"
+            filename = f"loc_{_safe_name(ident)}.{ext}"
             dest = os.path.join(folder, filename)
 
             if _download_file(target, dest):
@@ -334,7 +334,7 @@ WM_API = "https://commons.wikimedia.org/w/api.php"
 
 
 def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
-    folder = os.path.join(root, "wikimedia", media_type, _safe_name(query))
+    folder = root
     os.makedirs(folder, exist_ok=True)
 
     file_kind = "video" if media_type == "video" else ("audio" if media_type == "audio" else "bitmap")
@@ -372,7 +372,7 @@ def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
             if not file_url:
                 continue
             ext = file_url.rsplit(".", 1)[-1].split("?")[0]
-            filename = f"{_safe_name(title)}.{ext}"
+            filename = f"wm_{_safe_name(title)}.{ext}"
             dest = os.path.join(folder, filename)
 
             if _download_file(file_url, dest):
