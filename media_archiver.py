@@ -47,6 +47,38 @@ ALLOWED_LICENSES = {
 _metadata_lock = threading.Lock()
 
 
+class Control:
+    """Pause / stop controller passed through fetch jobs."""
+
+    def __init__(self):
+        self._pause = threading.Event()
+        self._stop = threading.Event()
+        self._resume = threading.Event()
+        self._resume.set()
+
+    def pause(self):
+        self._pause.set()
+        self._resume.clear()
+
+    def resume(self):
+        self._pause.clear()
+        self._resume.set()
+
+    def stop(self):
+        self._stop.set()
+        self._resume.set()  # unblock anyone waiting
+
+    def is_stopped(self) -> bool:
+        return self._stop.is_set()
+
+    def wait_if_paused(self):
+        if self._pause.is_set() and not self._stop.is_set():
+            self._resume.wait()
+
+
+_NULL_CONTROL = Control()
+
+
 def _safe_name(text: str) -> str:
     text = re.sub(r"[^\w\-]+", "_", text, flags=re.UNICODE)
     return text.strip("_").lower()[:80] or "untitled"
@@ -111,7 +143,7 @@ def _license_ok(license_text: str | None) -> bool:
 NASA_SEARCH_URL = "https://images-api.nasa.gov/search"
 
 
-def fetch_nasa(query: str, media_type: str, limit: int, root: str) -> int:
+def fetch_nasa(query: str, media_type: str, limit: int, root: str, control: Control = _NULL_CONTROL) -> int:
     folder = os.path.join(root, "nasa", media_type, _safe_name(query))
     os.makedirs(folder, exist_ok=True)
 
@@ -120,6 +152,9 @@ def fetch_nasa(query: str, media_type: str, limit: int, root: str) -> int:
 
     saved = 0
     for item in items:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
         try:
             data = (item.get("data") or [{}])[0]
             nasa_id = data.get("nasa_id") or "unknown"
@@ -174,7 +209,7 @@ IA_META_URL = "https://archive.org/metadata/{identifier}"
 IA_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 
 
-def fetch_internet_archive(query: str, media_type: str, limit: int, root: str) -> int:
+def fetch_internet_archive(query: str, media_type: str, limit: int, root: str, control: Control = _NULL_CONTROL) -> int:
     folder = os.path.join(root, "internet_archive", media_type, _safe_name(query))
     os.makedirs(folder, exist_ok=True)
 
@@ -190,6 +225,9 @@ def fetch_internet_archive(query: str, media_type: str, limit: int, root: str) -
 
     saved = 0
     for doc in docs:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
         ident = doc.get("identifier")
         if not ident:
             continue
@@ -252,7 +290,7 @@ def fetch_internet_archive(query: str, media_type: str, limit: int, root: str) -
 LOC_SEARCH_URL = "https://www.loc.gov/search/"
 
 
-def fetch_loc(query: str, media_type: str, limit: int, root: str) -> int:
+def fetch_loc(query: str, media_type: str, limit: int, root: str, control: Control = _NULL_CONTROL) -> int:
     folder = os.path.join(root, "loc", media_type, _safe_name(query))
     os.makedirs(folder, exist_ok=True)
 
@@ -263,6 +301,9 @@ def fetch_loc(query: str, media_type: str, limit: int, root: str) -> int:
 
     saved = 0
     for item in results:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
         rights = (item.get("rights") or "") + " " + (item.get("rights_advisory") or [""])[0] if isinstance(item.get("rights_advisory"), list) else (item.get("rights") or "")
         if not (_license_ok(rights) or "no known restrictions" in rights.lower()):
             continue
@@ -315,7 +356,7 @@ def fetch_loc(query: str, media_type: str, limit: int, root: str) -> int:
 WM_API = "https://commons.wikimedia.org/w/api.php"
 
 
-def fetch_wikimedia(query: str, media_type: str, limit: int, root: str) -> int:
+def fetch_wikimedia(query: str, media_type: str, limit: int, root: str, control: Control = _NULL_CONTROL) -> int:
     folder = os.path.join(root, "wikimedia", media_type, _safe_name(query))
     os.makedirs(folder, exist_ok=True)
 
@@ -334,6 +375,9 @@ def fetch_wikimedia(query: str, media_type: str, limit: int, root: str) -> int:
 
     saved = 0
     for hit in hits:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
         title = hit.get("title")
         if not title:
             continue
@@ -391,7 +435,9 @@ SOURCES = {
 }
 
 
-def run(topics, media_types, sources, limit, root, workers):
+def run(topics, media_types, sources, limit, root, workers, control: Control = None, on_progress=None):
+    if control is None:
+        control = Control()
     os.makedirs(root, exist_ok=True)
     jobs = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -399,14 +445,18 @@ def run(topics, media_types, sources, limit, root, workers):
             for mt in media_types:
                 for src in sources:
                     fn = SOURCES[src]
-                    jobs.append(ex.submit(fn, topic, mt, limit, root))
+                    jobs.append(ex.submit(fn, topic, mt, limit, root, control))
         total = 0
         for fut in as_completed(jobs):
             try:
-                total += fut.result() or 0
+                got = fut.result() or 0
+                total += got
+                if on_progress:
+                    on_progress(total)
             except Exception as e:
                 logger.error("Job failed: %s", e)
     logger.info("DONE. Total saved: %d -> %s", total, root)
+    return total
 
 
 def parse_args():
