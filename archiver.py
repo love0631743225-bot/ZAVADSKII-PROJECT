@@ -30,9 +30,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("archiver")
 
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = (15, 300)   # (connect, read) — длинный read для тяжёлых видео
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 2
+DOWNLOAD_RETRIES = 4          # сколько раз пытаемся докачать файл целиком
 
 # Можно переопределить переменной окружения NASA_API_KEY
 NASA_API_KEY = os.environ.get("NASA_API_KEY", "1DoBGOx3c5tlxnsTf87SGh3spaAOYTegLH65m5XG")
@@ -106,27 +107,58 @@ def _http_get(url, params=None, stream=False):
 
 
 def _download_file(url, dest_path: str) -> bool:
-    """url может быть строкой или списком URL для перебора (фолбэки)."""
+    """url может быть строкой или списком URL (фолбэки). Поддерживает докачку с обрыва."""
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
         return True
     urls = [url] if isinstance(url, str) else list(url)
     tmp_path = dest_path + ".part"
     last_err = None
+
     for u in urls:
-        try:
-            with _http_get(u, stream=True) as r:
-                with open(tmp_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1 << 15):
-                        if chunk:
-                            f.write(chunk)
-            os.replace(tmp_path, dest_path)
-            return True
-        except Exception as e:
-            last_err = e
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            logger.warning("Не получилось через %s: %s — пробую следующий URL", u, e)
-    logger.error("Все попытки скачать %s провалились: %s", urls[0], last_err)
+        for attempt in range(DOWNLOAD_RETRIES):
+            try:
+                resume_pos = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+                headers = dict(HEADERS)
+                if resume_pos > 0:
+                    headers["Range"] = f"bytes={resume_pos}-"
+                mode = "ab" if resume_pos > 0 else "wb"
+
+                with requests.get(u, headers=headers, stream=True, timeout=DEFAULT_TIMEOUT) as r:
+                    if r.status_code == 416:
+                        # уже всё скачано, но переименовать не успели
+                        os.replace(tmp_path, dest_path)
+                        return True
+                    if resume_pos > 0 and r.status_code != 206:
+                        # сервер не поддерживает Range — качаем заново
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                        resume_pos = 0
+                        mode = "wb"
+                    r.raise_for_status()
+                    with open(tmp_path, mode) as f:
+                        for chunk in r.iter_content(chunk_size=1 << 16):
+                            if chunk:
+                                f.write(chunk)
+                # проверка целостности по Content-Length, если есть
+                expected = r.headers.get("Content-Length")
+                if expected and resume_pos == 0:
+                    actual = os.path.getsize(tmp_path)
+                    if actual < int(expected):
+                        raise IOError(f"размер {actual} < ожидаемого {expected}")
+                os.replace(tmp_path, dest_path)
+                return True
+            except Exception as e:
+                last_err = e
+                wait = RETRY_BACKOFF ** attempt
+                logger.warning("Обрыв %s (попытка %d/%d): %s — повтор через %ds",
+                               os.path.basename(dest_path), attempt + 1, DOWNLOAD_RETRIES, e, wait)
+                time.sleep(wait)
+        # все попытки по этому URL провалились — пробуем следующий
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        logger.warning("URL %s не получилось — пробую фолбэк", u)
+
+    logger.error("Все попытки скачать %s провалились: %s", os.path.basename(dest_path), last_err)
     return False
 
 
@@ -604,7 +636,7 @@ def launch_gui():
 
             def worker():
                 try:
-                    run(topics, media, list(SOURCES.keys()), limit, out, 8, self.control, progress)
+                    run(topics, media, list(SOURCES.keys()), limit, out, 4, self.control, progress)
                 except Exception as e:
                     logger.error("Сбой: %s", e)
                 finally:
