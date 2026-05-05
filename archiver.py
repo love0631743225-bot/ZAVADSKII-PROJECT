@@ -443,6 +443,159 @@ def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
     return saved
 
 
+# ─── STScI: Hubble + JWST (общий API) ────────────────────────────────────────
+
+def _fetch_stsci(host, source_label, prefix, query, media_type, limit, root, control=_NULL_CONTROL):
+    if media_type != "image":
+        logger.info("%s %s '%s': пропуск (только картинки)", source_label, media_type, query)
+        return 0
+
+    folder = root
+    os.makedirs(folder, exist_ok=True)
+
+    try:
+        all_items = _http_get(f"https://{host}/api/v3/images", params={"page": "all"}).json()
+    except Exception as e:
+        logger.error("%s: список изображений недоступен: %s", source_label, e)
+        return 0
+
+    q = query.lower()
+    matches = [it for it in all_items
+               if q in (it.get("name") or "").lower() or q in (it.get("mission") or "").lower()][:limit]
+
+    saved = 0
+    for it in matches:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
+        try:
+            img_id = it.get("id")
+            detail = _http_get(f"https://{host}/api/v3/image/{img_id}").json()
+            files = detail.get("image_files") or []
+            jpgs = [f for f in files if (f.get("file_url") or "").lower().endswith((".jpg", ".jpeg", ".png", ".tif"))]
+            if not jpgs:
+                continue
+            target = max(jpgs, key=lambda f: f.get("file_size") or 0)
+            file_url = target["file_url"]
+            if file_url.startswith("//"):
+                file_url = "https:" + file_url
+            ext = file_url.rsplit(".", 1)[-1].split("?")[0]
+            filename = f"{prefix}_{_safe_name(it.get('name') or str(img_id))}.{ext}"
+            dest = os.path.join(folder, filename)
+
+            if _download_file(file_url, dest):
+                _append_metadata(folder, {
+                    "filename": filename, "source": source_label, "id": img_id,
+                    "title": it.get("name"), "mission": it.get("mission"),
+                    "license": "Public Domain (NASA/STScI)",
+                    "credit": detail.get("credits") or "NASA/STScI",
+                    "url": f"https://{host}/contents/media/images/{img_id}",
+                    "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+                })
+                saved += 1
+        except Exception as e:
+            logger.error("%s item failed: %s", source_label, e)
+    logger.info("%s %s '%s': %d items", source_label, media_type, query, saved)
+    return saved
+
+
+def fetch_hubble(query, media_type, limit, root, control=_NULL_CONTROL):
+    return _fetch_stsci("hubblesite.org", "Hubble Space Telescope", "hubble",
+                        query, media_type, limit, root, control)
+
+
+def fetch_jwst(query, media_type, limit, root, control=_NULL_CONTROL):
+    return _fetch_stsci("webbtelescope.org", "James Webb Space Telescope", "jwst",
+                        query, media_type, limit, root, control)
+
+
+# ─── Chandra X-ray Observatory ───────────────────────────────────────────────
+
+def fetch_chandra(query, media_type, limit, root, control=_NULL_CONTROL):
+    if media_type != "image":
+        logger.info("Chandra %s '%s': пропуск (только картинки)", media_type, query)
+        return 0
+
+    folder = root
+    os.makedirs(folder, exist_ok=True)
+
+    try:
+        html = _http_get("https://chandra.harvard.edu/photo/cgi-bin/search.cgi",
+                         params={"query": query}).text
+    except Exception as e:
+        logger.error("Chandra: поиск недоступен: %s", e)
+        return 0
+
+    releases = list(dict.fromkeys(re.findall(r"/photo/(\d{4})/([a-z0-9_]+)/", html)))[:limit]
+
+    saved = 0
+    for year, name in releases:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
+        for candidate in (f"{name}.jpg", f"{name}_xray.jpg", "more.jpg"):
+            file_url = f"https://chandra.harvard.edu/photo/{year}/{name}/{candidate}"
+            filename = f"chandra_{year}_{_safe_name(name)}.jpg"
+            dest = os.path.join(folder, filename)
+            try:
+                if _download_file(file_url, dest):
+                    _append_metadata(folder, {
+                        "filename": filename, "source": "Chandra X-ray Observatory",
+                        "id": f"{year}/{name}", "license": "Public Domain (NASA/CXC/SAO)",
+                        "credit": "NASA/CXC/SAO",
+                        "url": f"https://chandra.harvard.edu/photo/{year}/{name}/",
+                        "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+                    })
+                    saved += 1
+                    break
+            except Exception:
+                continue
+    logger.info("Chandra %s '%s': %d items", media_type, query, saved)
+    return saved
+
+
+# ─── NRAO (National Radio Astronomy Observatory) ─────────────────────────────
+
+def fetch_nrao(query, media_type, limit, root, control=_NULL_CONTROL):
+    if media_type != "image":
+        logger.info("NRAO %s '%s': пропуск (только картинки)", media_type, query)
+        return 0
+
+    folder = root
+    os.makedirs(folder, exist_ok=True)
+
+    try:
+        html = _http_get("https://public.nrao.edu/", params={"s": query}).text
+    except Exception as e:
+        logger.error("NRAO: поиск недоступен: %s", e)
+        return 0
+
+    img_urls = list(dict.fromkeys(re.findall(
+        r'https://public\.nrao\.edu/wp-content/uploads/[^"\'\s]+?\.(?:jpg|jpeg|png)',
+        html, re.IGNORECASE,
+    )))[:limit]
+
+    saved = 0
+    for url in img_urls:
+        control.wait_if_paused()
+        if control.is_stopped():
+            break
+        ext = url.rsplit(".", 1)[-1].split("?")[0].lower()
+        name = _safe_name(url.rsplit("/", 1)[-1].rsplit(".", 1)[0])
+        filename = f"nrao_{name}.{ext}"
+        dest = os.path.join(folder, filename)
+        if _download_file(url, dest):
+            _append_metadata(folder, {
+                "filename": filename, "source": "NRAO",
+                "license": "Free use with credit (NRAO/AUI/NSF)",
+                "credit": "NRAO/AUI/NSF", "url": url,
+                "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            })
+            saved += 1
+    logger.info("NRAO %s '%s': %d items", media_type, query, saved)
+    return saved
+
+
 # ─── Оркестратор ─────────────────────────────────────────────────────────────
 
 SOURCES = {
@@ -450,6 +603,10 @@ SOURCES = {
     "internet_archive": fetch_internet_archive,
     "loc": fetch_loc,
     "wikimedia": fetch_wikimedia,
+    "hubble": fetch_hubble,
+    "jwst": fetch_jwst,
+    "chandra": fetch_chandra,
+    "nrao": fetch_nrao,
 }
 
 
