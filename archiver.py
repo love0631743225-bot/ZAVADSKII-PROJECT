@@ -37,6 +37,10 @@ RETRY_BACKOFF = 2
 # Можно переопределить переменной окружения NASA_API_KEY
 NASA_API_KEY = os.environ.get("NASA_API_KEY", "1DoBGOx3c5tlxnsTf87SGh3spaAOYTegLH65m5XG")
 
+# Wikimedia требует осмысленный User-Agent, иначе 403
+USER_AGENT = "SpaceMediaArchiver/1.0 (educational; contact: archiver@example.com)"
+HEADERS = {"User-Agent": USER_AGENT}
+
 ALLOWED_LICENSES = {
     "public domain", "publicdomain", "pd",
     "cc0", "creative commons cc0",
@@ -90,7 +94,7 @@ def _http_get(url, params=None, stream=False):
     last_err = None
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            r = requests.get(url, params=params, stream=stream, timeout=DEFAULT_TIMEOUT)
+            r = requests.get(url, params=params, headers=HEADERS, stream=stream, timeout=DEFAULT_TIMEOUT)
             r.raise_for_status()
             return r
         except requests.RequestException as e:
@@ -149,7 +153,8 @@ def fetch_nasa(query, media_type, limit, root, control=_NULL_CONTROL):
     folder = root
     os.makedirs(folder, exist_ok=True)
 
-    r = _http_get(NASA_SEARCH_URL, params={"q": query, "media_type": media_type, "api_key": NASA_API_KEY})
+    # NASA images-api не требует api_key (это открытый endpoint, ключ нужен только для api.nasa.gov)
+    r = _http_get(NASA_SEARCH_URL, params={"q": query, "media_type": media_type})
     items = r.json().get("collection", {}).get("items", [])[:limit]
 
     saved = 0
