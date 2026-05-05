@@ -404,10 +404,28 @@ SOURCES = {
 }
 
 
+def _cleanup_part_files(root: str) -> int:
+    if not os.path.isdir(root):
+        return 0
+    removed = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if name.endswith(".part"):
+                try:
+                    os.remove(os.path.join(dirpath, name))
+                    removed += 1
+                except OSError as e:
+                    logger.warning("Не удалось удалить %s: %s", name, e)
+    if removed:
+        logger.info("Удалено недокачанных .part-файлов: %d", removed)
+    return removed
+
+
 def run(topics, media_types, sources, limit, root, workers, control=None, on_progress=None):
     if control is None:
         control = Control()
     os.makedirs(root, exist_ok=True)
+    _cleanup_part_files(root)
     jobs = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for topic in topics:
