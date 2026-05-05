@@ -13,6 +13,8 @@ import logging
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -103,12 +105,20 @@ def _seed_existing_hashes(folder: str) -> int:
 
 
 def _save_with_dedupe(url, dest_path: str, folder: str, meta: dict) -> bool:
-    """Качает файл и записывает metadata, но если контент дубликат — удаляет и не пишет."""
+    """Качает файл, проверяет дубликаты и (для видео) человеческую речь."""
     if not _download_file(url, dest_path):
         return False
     if _is_duplicate_and_drop(dest_path):
         logger.info("Дубликат удалён: %s", os.path.basename(dest_path))
         return False
+    if SKIP_SPEECH_VIDEOS and dest_path.lower().endswith(VIDEO_EXTS):
+        if _has_human_speech(dest_path, SPEECH_THRESHOLD_SEC):
+            logger.info("Речь обнаружена, удалено: %s", os.path.basename(dest_path))
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+            return False
     _append_metadata(folder, meta)
     return True
 
@@ -650,6 +660,88 @@ def fetch_nrao(query, media_type, limit, root, control=_NULL_CONTROL):
     return saved
 
 
+# ─── Детектор речи (Silero VAD) ──────────────────────────────────────────────
+
+VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".ogv")
+SKIP_SPEECH_VIDEOS = False
+SPEECH_THRESHOLD_SEC = 1.5
+
+_speech_model = None
+_speech_get_ts = None
+_speech_read_audio = None
+_speech_init_lock = threading.Lock()
+_speech_init_failed = False
+
+
+def _init_speech_model() -> bool:
+    """Лениво загружает Silero VAD при первом обращении. Кэширует результат."""
+    global _speech_model, _speech_get_ts, _speech_read_audio, _speech_init_failed
+    if _speech_model is not None:
+        return True
+    if _speech_init_failed:
+        return False
+    with _speech_init_lock:
+        if _speech_model is not None:
+            return True
+        if _speech_init_failed:
+            return False
+        if not shutil.which("ffmpeg"):
+            logger.error("Нужен ffmpeg в PATH для проверки речи. Установи и перезапусти.")
+            _speech_init_failed = True
+            return False
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            logger.error("Нужен torch: pip install torch")
+            _speech_init_failed = True
+            return False
+        try:
+            import torch
+            logger.info("Загружаю Silero VAD (один раз)...")
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                trust_repo=True,
+            )
+            _speech_model = model
+            _speech_get_ts = utils[0]
+            _speech_read_audio = utils[2]
+            logger.info("Silero VAD готов")
+            return True
+        except Exception as e:
+            logger.error("Не удалось загрузить Silero VAD: %s", e)
+            _speech_init_failed = True
+            return False
+
+
+def _has_human_speech(video_path: str, threshold_sec: float = SPEECH_THRESHOLD_SEC) -> bool:
+    if not _init_speech_model():
+        return False
+    audio_path = video_path + ".vad.wav"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "16000", "-vn",
+             "-loglevel", "error", audio_path],
+            capture_output=True, timeout=180, check=True,
+        )
+        wav = _speech_read_audio(audio_path, sampling_rate=16000)
+        timestamps = _speech_get_ts(wav, _speech_model, sampling_rate=16000, threshold=0.5)
+        total = sum((t["end"] - t["start"]) / 16000 for t in timestamps)
+        return total > threshold_sec
+    except subprocess.TimeoutExpired:
+        logger.warning("VAD timeout: %s", os.path.basename(video_path))
+        return False
+    except Exception as e:
+        logger.warning("VAD failed for %s: %s", os.path.basename(video_path), e)
+        return False
+    finally:
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+
 # ─── Оркестратор ─────────────────────────────────────────────────────────────
 
 SOURCES = {
@@ -789,6 +881,13 @@ def launch_gui():
             self.out_var = tk.StringVar(value=saved_out)
             ttk.Entry(params, textvariable=self.out_var, width=50).grid(row=2, column=1, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Button(params, text="Обзор...", command=self._browse).grid(row=2, column=3, sticky="w", padx=6, pady=6)
+
+            self.skip_speech_var = tk.BooleanVar(value=bool(self.gui_config.get("skip_speech", False)))
+            ttk.Checkbutton(
+                params, text="Отсеивать видео с человеческой речью (Silero VAD)",
+                variable=self.skip_speech_var,
+            ).grid(row=3, column=1, columnspan=3, sticky="w", padx=6, pady=6)
+
             params.columnconfigure(1, weight=1)
 
             ctrl = ttk.Frame(self.root); ctrl.pack(fill="x", **pad)
@@ -866,8 +965,13 @@ def launch_gui():
             out = self.out_var.get().strip() or "archive_db"
             media = self._media_types()
 
+            global SKIP_SPEECH_VIDEOS
+            SKIP_SPEECH_VIDEOS = bool(self.skip_speech_var.get())
             self.gui_config["output_dir"] = out
+            self.gui_config["skip_speech"] = SKIP_SPEECH_VIDEOS
             _save_gui_config(self.gui_config)
+            if SKIP_SPEECH_VIDEOS:
+                logger.info("Фильтр речи включён — видео с разговором будут удаляться")
 
             self.control = Control()
             self.total_saved = 0
