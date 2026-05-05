@@ -632,9 +632,22 @@ def launch_gui():
             os._exit(0)
 
         def _on_done(self):
-            self.status_var.set(f"Готово. Всего скачано: {self.total_saved}")
+            self.status_var.set(f"✓ ЗАКОНЧИЛ. Всего скачано: {self.total_saved}")
             self._set_buttons(running=False, paused=False)
-            logger.info("=== Завершено. Скачано: %d ===", self.total_saved)
+            stopped = self.control.is_stopped() if self.control else False
+            banner = "ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ" if stopped else "ЗАКОНЧИЛ"
+            logger.info("=" * 60)
+            logger.info("✓ %s. Скачано файлов: %d", banner, self.total_saved)
+            logger.info("Папка: %s", self.out_var.get())
+            logger.info("=" * 60)
+            try:
+                self.root.bell()
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "Готово",
+                f"{banner}\n\nСкачано файлов: {self.total_saved}\nПапка: {self.out_var.get()}",
+            )
 
         def _set_buttons(self, running, paused):
             self.btn_start.configure(state="disabled" if running else "normal")
