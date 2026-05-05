@@ -32,6 +32,9 @@ DEFAULT_TIMEOUT = 60
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 2
 
+# Можно переопределить переменной окружения NASA_API_KEY
+NASA_API_KEY = os.environ.get("NASA_API_KEY", "1DoBGOx3c5tlxnsTf87SGh3spaAOYTegLH65m5XG")
+
 ALLOWED_LICENSES = {
     "public domain",
     "publicdomain",
@@ -147,7 +150,7 @@ def fetch_nasa(query: str, media_type: str, limit: int, root: str, control: Cont
     folder = os.path.join(root, "nasa", media_type, _safe_name(query))
     os.makedirs(folder, exist_ok=True)
 
-    r = _http_get(NASA_SEARCH_URL, params={"q": query, "media_type": media_type})
+    r = _http_get(NASA_SEARCH_URL, params={"q": query, "media_type": media_type, "api_key": NASA_API_KEY})
     items = r.json().get("collection", {}).get("items", [])[:limit]
 
     saved = 0
