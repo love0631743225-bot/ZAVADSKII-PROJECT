@@ -7,6 +7,7 @@ Space Media Archiver — всё в одном файле
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -50,6 +51,66 @@ ALLOWED_LICENSES = {
 }
 
 _metadata_lock = threading.Lock()
+_dedupe_lock = threading.Lock()
+_seen_hashes: set[str] = set()
+
+
+def _file_hash(path: str, block: int = 1 << 20) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(block)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_duplicate_and_drop(path: str) -> bool:
+    """Считает MD5 файла, проверяет в общем наборе. Если уже видели — удаляет файл и возвращает True."""
+    try:
+        digest = _file_hash(path)
+    except OSError:
+        return False
+    with _dedupe_lock:
+        if digest in _seen_hashes:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return True
+        _seen_hashes.add(digest)
+        return False
+
+
+def _seed_existing_hashes(folder: str) -> int:
+    """Перед стартом индексирует уже лежащие в папке файлы, чтобы не качать их повторно."""
+    if not os.path.isdir(folder):
+        return 0
+    seeded = 0
+    for name in os.listdir(folder):
+        if name == "metadata.json" or name.endswith(".part"):
+            continue
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            _seen_hashes.add(_file_hash(path))
+            seeded += 1
+        except OSError:
+            pass
+    return seeded
+
+
+def _save_with_dedupe(url, dest_path: str, folder: str, meta: dict) -> bool:
+    """Качает файл и записывает metadata, но если контент дубликат — удаляет и не пишет."""
+    if not _download_file(url, dest_path):
+        return False
+    if _is_duplicate_and_drop(dest_path):
+        logger.info("Дубликат удалён: %s", os.path.basename(dest_path))
+        return False
+    _append_metadata(folder, meta)
+    return True
 
 
 # ─── Контроллер паузы/остановки ──────────────────────────────────────────────
@@ -224,14 +285,13 @@ def fetch_nasa(query, media_type, limit, root, control=_NULL_CONTROL):
             filename = f"nasa_{_safe_name(nasa_id)}.{ext}"
             dest = os.path.join(folder, filename)
 
-            if _download_file(target, dest):
-                _append_metadata(folder, {
-                    "filename": filename, "source": "NASA Image and Video Library",
-                    "id": nasa_id, "title": data.get("title"),
-                    "description": data.get("description"), "date_created": data.get("date_created"),
-                    "license": "Public Domain (NASA)", "credit": data.get("photographer") or "NASA",
-                    "url": target, "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                })
+            if _save_with_dedupe(target, dest, folder, {
+                "filename": filename, "source": "NASA Image and Video Library",
+                "id": nasa_id, "title": data.get("title"),
+                "description": data.get("description"), "date_created": data.get("date_created"),
+                "license": "Public Domain (NASA)", "credit": data.get("photographer") or "NASA",
+                "url": target, "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            }):
                 saved += 1
         except Exception as e:
             logger.error("NASA item failed: %s", e)
@@ -296,15 +356,14 @@ def fetch_internet_archive(query, media_type, limit, root, control=_NULL_CONTROL
             filename = f"ia_{_safe_name(ident)}.{ext}"
             dest = os.path.join(folder, filename)
 
-            if _download_file(file_url, dest):
-                _append_metadata(folder, {
-                    "filename": filename, "source": "Internet Archive", "id": ident,
-                    "title": doc.get("title"), "creator": doc.get("creator"), "date": doc.get("date"),
-                    "license": license_field or "Public Domain",
-                    "credit": doc.get("creator") or "Unknown",
-                    "url": f"https://archive.org/details/{ident}",
-                    "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                })
+            if _save_with_dedupe(file_url, dest, folder, {
+                "filename": filename, "source": "Internet Archive", "id": ident,
+                "title": doc.get("title"), "creator": doc.get("creator"), "date": doc.get("date"),
+                "license": license_field or "Public Domain",
+                "credit": doc.get("creator") or "Unknown",
+                "url": f"https://archive.org/details/{ident}",
+                "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            }):
                 saved += 1
         except Exception as e:
             logger.error("IA item %s failed: %s", ident, e)
@@ -357,13 +416,12 @@ def fetch_loc(query, media_type, limit, root, control=_NULL_CONTROL):
             filename = f"loc_{_safe_name(ident)}.{ext}"
             dest = os.path.join(folder, filename)
 
-            if _download_file(target, dest):
-                _append_metadata(folder, {
-                    "filename": filename, "source": "Library of Congress", "id": ident,
-                    "title": item.get("title"), "date": item.get("date"),
-                    "license": rights or "No known restrictions", "credit": "Library of Congress",
-                    "url": item.get("url"), "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                })
+            if _save_with_dedupe(target, dest, folder, {
+                "filename": filename, "source": "Library of Congress", "id": ident,
+                "title": item.get("title"), "date": item.get("date"),
+                "license": rights or "No known restrictions", "credit": "Library of Congress",
+                "url": item.get("url"), "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            }):
                 saved += 1
         except Exception as e:
             logger.error("LOC item failed: %s", e)
@@ -429,13 +487,12 @@ def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
             fallback_url = f"https://commons.wikimedia.org/wiki/Special:FilePath/{quote(bare_name)}"
             urls = [file_url, fallback_url]
 
-            if _download_file(urls, dest):
-                _append_metadata(folder, {
-                    "filename": filename, "source": "Wikimedia Commons", "id": title,
-                    "license": license_short, "credit": artist,
-                    "url": f"https://commons.wikimedia.org/wiki/{quote_plus(title)}",
-                    "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                })
+            if _save_with_dedupe(urls, dest, folder, {
+                "filename": filename, "source": "Wikimedia Commons", "id": title,
+                "license": license_short, "credit": artist,
+                "url": f"https://commons.wikimedia.org/wiki/{quote_plus(title)}",
+                "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            }):
                 saved += 1
         except Exception as e:
             logger.error("Wikimedia item %s failed: %s", title, e)
@@ -483,15 +540,14 @@ def _fetch_stsci(host, source_label, prefix, query, media_type, limit, root, con
             filename = f"{prefix}_{_safe_name(it.get('name') or str(img_id))}.{ext}"
             dest = os.path.join(folder, filename)
 
-            if _download_file(file_url, dest):
-                _append_metadata(folder, {
-                    "filename": filename, "source": source_label, "id": img_id,
-                    "title": it.get("name"), "mission": it.get("mission"),
-                    "license": "Public Domain (NASA/STScI)",
-                    "credit": detail.get("credits") or "NASA/STScI",
-                    "url": f"https://{host}/contents/media/images/{img_id}",
-                    "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                })
+            if _save_with_dedupe(file_url, dest, folder, {
+                "filename": filename, "source": source_label, "id": img_id,
+                "title": it.get("name"), "mission": it.get("mission"),
+                "license": "Public Domain (NASA/STScI)",
+                "credit": detail.get("credits") or "NASA/STScI",
+                "url": f"https://{host}/contents/media/images/{img_id}",
+                "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+            }):
                 saved += 1
         except Exception as e:
             logger.error("%s item failed: %s", source_label, e)
@@ -538,14 +594,13 @@ def fetch_chandra(query, media_type, limit, root, control=_NULL_CONTROL):
             filename = f"chandra_{year}_{_safe_name(name)}.jpg"
             dest = os.path.join(folder, filename)
             try:
-                if _download_file(file_url, dest):
-                    _append_metadata(folder, {
-                        "filename": filename, "source": "Chandra X-ray Observatory",
-                        "id": f"{year}/{name}", "license": "Public Domain (NASA/CXC/SAO)",
-                        "credit": "NASA/CXC/SAO",
-                        "url": f"https://chandra.harvard.edu/photo/{year}/{name}/",
-                        "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-                    })
+                if _save_with_dedupe(file_url, dest, folder, {
+                    "filename": filename, "source": "Chandra X-ray Observatory",
+                    "id": f"{year}/{name}", "license": "Public Domain (NASA/CXC/SAO)",
+                    "credit": "NASA/CXC/SAO",
+                    "url": f"https://chandra.harvard.edu/photo/{year}/{name}/",
+                    "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+                }):
                     saved += 1
                     break
             except Exception:
@@ -584,13 +639,12 @@ def fetch_nrao(query, media_type, limit, root, control=_NULL_CONTROL):
         name = _safe_name(url.rsplit("/", 1)[-1].rsplit(".", 1)[0])
         filename = f"nrao_{name}.{ext}"
         dest = os.path.join(folder, filename)
-        if _download_file(url, dest):
-            _append_metadata(folder, {
-                "filename": filename, "source": "NRAO",
-                "license": "Free use with credit (NRAO/AUI/NSF)",
-                "credit": "NRAO/AUI/NSF", "url": url,
-                "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
-            })
+        if _save_with_dedupe(url, dest, folder, {
+            "filename": filename, "source": "NRAO",
+            "license": "Free use with credit (NRAO/AUI/NSF)",
+            "credit": "NRAO/AUI/NSF", "url": url,
+            "downloaded": datetime.utcnow().strftime("%Y-%m-%d"),
+        }):
             saved += 1
     logger.info("NRAO %s '%s': %d items", media_type, query, saved)
     return saved
@@ -632,6 +686,9 @@ def run(topics, media_types, sources, limit, root, workers, control=None, on_pro
         control = Control()
     os.makedirs(root, exist_ok=True)
     _cleanup_part_files(root)
+    seeded = _seed_existing_hashes(root)
+    if seeded:
+        logger.info("Проиндексировано уже скачанных файлов: %d (новые дубликаты будут отсеяны)", seeded)
     jobs = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for topic in topics:
