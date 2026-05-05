@@ -502,8 +502,15 @@ def launch_gui():
 
             log_frame = ttk.LabelFrame(self.root, text="Лог работы")
             log_frame.pack(fill="both", expand=True, **pad)
+            theme = getattr(self.root, "_theme", {"panel": "#111", "fg": "#ddd", "accent": "#a26bff", "border": "#2a2a30"})
             self.log_text = tk.Text(log_frame, height=18, wrap="word", state="disabled",
-                                    bg="#111", fg="#ddd", insertbackground="#ddd")
+                                    bg=theme["panel"], fg=theme["fg"],
+                                    insertbackground=theme["accent"],
+                                    selectbackground=theme["accent"], selectforeground="#ffffff",
+                                    relief="flat", borderwidth=0,
+                                    highlightthickness=1, highlightbackground=theme["border"],
+                                    highlightcolor=theme["accent"],
+                                    font=("Consolas", 9))
             scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
             self.log_text.configure(yscrollcommand=scroll.set)
             self.log_text.pack(side="left", fill="both", expand=True)
@@ -613,14 +620,80 @@ def launch_gui():
             self.btn_stop.configure(state="normal" if running else "disabled")
 
     root = tk.Tk()
-    try:
-        style = ttk.Style()
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
-    except Exception:
-        pass
+    _apply_dark_theme(root)
     App(root)
     root.mainloop()
+
+
+def _apply_dark_theme(root):
+    import tkinter as tk
+    from tkinter import ttk
+
+    BG = "#0f0f10"            # фон окна, почти чёрный
+    PANEL = "#1a1a1d"         # панели, рамки
+    PANEL_HOVER = "#242428"
+    FG = "#e6e6e6"            # основной текст
+    FG_MUTED = "#9a9aa3"
+    ACCENT = "#a26bff"        # фиолетовый акцент
+    ACCENT_HOVER = "#b886ff"
+    ACCENT_DARK = "#5b3aa0"
+    BORDER = "#2a2a30"
+    DISABLED = "#3a3a40"
+
+    root.configure(bg=BG)
+    root.option_add("*Background", BG)
+    root.option_add("*Foreground", FG)
+    root.option_add("*selectBackground", ACCENT_DARK)
+    root.option_add("*selectForeground", FG)
+
+    style = ttk.Style(root)
+    if "clam" in style.theme_names():
+        style.theme_use("clam")
+
+    style.configure(".", background=BG, foreground=FG, fieldbackground=PANEL,
+                    bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
+                    troughcolor=PANEL, focuscolor=ACCENT)
+    style.configure("TFrame", background=BG)
+    style.configure("TLabel", background=BG, foreground=FG)
+    style.configure("TLabelframe", background=BG, foreground=ACCENT, bordercolor=BORDER)
+    style.configure("TLabelframe.Label", background=BG, foreground=ACCENT, font=("Segoe UI", 10, "bold"))
+
+    style.configure("TButton",
+                    background=PANEL, foreground=FG,
+                    bordercolor=BORDER, lightcolor=PANEL, darkcolor=PANEL,
+                    padding=(12, 6), relief="flat")
+    style.map("TButton",
+              background=[("active", ACCENT), ("pressed", ACCENT_HOVER), ("disabled", PANEL)],
+              foreground=[("active", "#ffffff"), ("disabled", DISABLED)],
+              bordercolor=[("active", ACCENT)])
+
+    style.configure("TEntry",
+                    fieldbackground=PANEL, foreground=FG,
+                    insertcolor=ACCENT, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
+    style.map("TEntry", bordercolor=[("focus", ACCENT)])
+
+    style.configure("TSpinbox",
+                    fieldbackground=PANEL, foreground=FG,
+                    background=PANEL, bordercolor=BORDER, arrowcolor=ACCENT)
+    style.map("TSpinbox", bordercolor=[("focus", ACCENT)])
+
+    style.configure("TRadiobutton", background=BG, foreground=FG, focuscolor=BG)
+    style.map("TRadiobutton",
+              background=[("active", BG)],
+              foreground=[("active", ACCENT)],
+              indicatorcolor=[("selected", ACCENT), ("!selected", BORDER)])
+
+    style.configure("Vertical.TScrollbar",
+                    background=PANEL, troughcolor=BG, bordercolor=BG,
+                    arrowcolor=FG_MUTED, lightcolor=PANEL, darkcolor=PANEL)
+    style.map("Vertical.TScrollbar",
+              background=[("active", ACCENT_DARK)])
+
+    # значения для tk.Text/виджетов вне ttk
+    root._theme = {
+        "bg": BG, "panel": PANEL, "fg": FG, "fg_muted": FG_MUTED,
+        "accent": ACCENT, "border": BORDER,
+    }
 
 
 # ─── CLI / Entry point ───────────────────────────────────────────────────────
