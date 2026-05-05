@@ -177,6 +177,14 @@ def _http_get(url, params=None, stream=False):
     raise last_err
 
 
+def _safe_remove(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def _download_file(url, dest_path: str) -> bool:
     """url может быть строкой или списком URL (фолбэки). Поддерживает докачку с обрыва."""
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
@@ -184,53 +192,56 @@ def _download_file(url, dest_path: str) -> bool:
     urls = [url] if isinstance(url, str) else list(url)
     tmp_path = dest_path + ".part"
     last_err = None
+    success = False
 
-    for u in urls:
-        for attempt in range(DOWNLOAD_RETRIES):
-            try:
-                resume_pos = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-                headers = dict(HEADERS)
-                if resume_pos > 0:
-                    headers["Range"] = f"bytes={resume_pos}-"
-                mode = "ab" if resume_pos > 0 else "wb"
+    try:
+        for u in urls:
+            for attempt in range(DOWNLOAD_RETRIES):
+                try:
+                    resume_pos = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+                    headers = dict(HEADERS)
+                    if resume_pos > 0:
+                        headers["Range"] = f"bytes={resume_pos}-"
+                    mode = "ab" if resume_pos > 0 else "wb"
 
-                with requests.get(u, headers=headers, stream=True, timeout=DEFAULT_TIMEOUT) as r:
-                    if r.status_code == 416:
-                        # уже всё скачано, но переименовать не успели
-                        os.replace(tmp_path, dest_path)
-                        return True
-                    if resume_pos > 0 and r.status_code != 206:
-                        # сервер не поддерживает Range — качаем заново
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                        resume_pos = 0
-                        mode = "wb"
-                    r.raise_for_status()
-                    with open(tmp_path, mode) as f:
-                        for chunk in r.iter_content(chunk_size=1 << 16):
-                            if chunk:
-                                f.write(chunk)
-                # проверка целостности по Content-Length, если есть
-                expected = r.headers.get("Content-Length")
-                if expected and resume_pos == 0:
-                    actual = os.path.getsize(tmp_path)
-                    if actual < int(expected):
-                        raise IOError(f"размер {actual} < ожидаемого {expected}")
-                os.replace(tmp_path, dest_path)
-                return True
-            except Exception as e:
-                last_err = e
-                wait = RETRY_BACKOFF ** attempt
-                logger.warning("Обрыв %s (попытка %d/%d): %s — повтор через %ds",
-                               os.path.basename(dest_path), attempt + 1, DOWNLOAD_RETRIES, e, wait)
-                time.sleep(wait)
-        # все попытки по этому URL провалились — пробуем следующий
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        logger.warning("URL %s не получилось — пробую фолбэк", u)
+                    with requests.get(u, headers=headers, stream=True, timeout=DEFAULT_TIMEOUT) as r:
+                        if r.status_code == 416:
+                            os.replace(tmp_path, dest_path)
+                            success = True
+                            return True
+                        if resume_pos > 0 and r.status_code != 206:
+                            _safe_remove(tmp_path)
+                            resume_pos = 0
+                            mode = "wb"
+                        r.raise_for_status()
+                        content_length = r.headers.get("Content-Length")
+                        with open(tmp_path, mode) as f:
+                            for chunk in r.iter_content(chunk_size=1 << 16):
+                                if chunk:
+                                    f.write(chunk)
+                    if content_length and resume_pos == 0:
+                        actual = os.path.getsize(tmp_path)
+                        if actual < int(content_length):
+                            raise IOError(f"размер {actual} < ожидаемого {content_length}")
+                    os.replace(tmp_path, dest_path)
+                    success = True
+                    return True
+                except Exception as e:
+                    last_err = e
+                    wait = RETRY_BACKOFF ** attempt
+                    logger.warning("Обрыв %s (попытка %d/%d): %s — повтор через %ds",
+                                   os.path.basename(dest_path), attempt + 1, DOWNLOAD_RETRIES, e, wait)
+                    time.sleep(wait)
+            # все попытки по этому URL провалились — чистим перед фолбэком
+            _safe_remove(tmp_path)
+            logger.warning("URL %s не получилось — пробую следующий", u)
 
-    logger.error("Все попытки скачать %s провалились: %s", os.path.basename(dest_path), last_err)
-    return False
+        logger.error("Все попытки скачать %s провалились: %s", os.path.basename(dest_path), last_err)
+        return False
+    finally:
+        # Гарантированная зачистка: если по любой причине вышли без success — .part не остаётся
+        if not success:
+            _safe_remove(tmp_path)
 
 
 def _append_metadata(folder: str, entry: dict) -> None:
@@ -781,20 +792,24 @@ def run(topics, media_types, sources, limit, root, workers, control=None, on_pro
     seeded = _seed_existing_hashes(root)
     if seeded:
         logger.info("Проиндексировано уже скачанных файлов: %d (новые дубликаты будут отсеяны)", seeded)
-    jobs = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for topic in topics:
-            for mt in media_types:
-                for src in sources:
-                    jobs.append(ex.submit(SOURCES[src], topic, mt, limit, root, control))
-        total = 0
-        for fut in as_completed(jobs):
-            try:
-                total += fut.result() or 0
-                if on_progress:
-                    on_progress(total)
-            except Exception as e:
-                logger.error("Job failed: %s", e)
+    total = 0
+    try:
+        jobs = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for topic in topics:
+                for mt in media_types:
+                    for src in sources:
+                        jobs.append(ex.submit(SOURCES[src], topic, mt, limit, root, control))
+            for fut in as_completed(jobs):
+                try:
+                    total += fut.result() or 0
+                    if on_progress:
+                        on_progress(total)
+                except Exception as e:
+                    logger.error("Job failed: %s", e)
+    finally:
+        # Финальная зачистка: даже если поток упал/был прерван, .part-файлы не остаются
+        _cleanup_part_files(root)
     logger.info("DONE. Total saved: %d -> %s", total, root)
     return total
 
@@ -1025,6 +1040,10 @@ def launch_gui():
             os._exit(0)
 
         def _on_done(self):
+            try:
+                _cleanup_part_files(self.out_var.get())
+            except Exception:
+                pass
             self.status_var.set(f"✓ ЗАКОНЧИЛ. Всего скачано: {self.total_saved}")
             self._set_buttons(running=False, paused=False)
             stopped = self.control.is_stopped() if self.control else False
