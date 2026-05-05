@@ -105,23 +105,29 @@ def _http_get(url, params=None, stream=False):
     raise last_err
 
 
-def _download_file(url: str, dest_path: str) -> bool:
+def _download_file(url, dest_path: str) -> bool:
+    """url может быть строкой или списком URL для перебора (фолбэки)."""
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
         return True
+    urls = [url] if isinstance(url, str) else list(url)
     tmp_path = dest_path + ".part"
-    try:
-        with _http_get(url, stream=True) as r:
-            with open(tmp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 15):
-                    if chunk:
-                        f.write(chunk)
-        os.replace(tmp_path, dest_path)
-        return True
-    except Exception as e:
-        logger.error("Download failed %s: %s", url, e)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        return False
+    last_err = None
+    for u in urls:
+        try:
+            with _http_get(u, stream=True) as r:
+                with open(tmp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 15):
+                        if chunk:
+                            f.write(chunk)
+            os.replace(tmp_path, dest_path)
+            return True
+        except Exception as e:
+            last_err = e
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            logger.warning("Не получилось через %s: %s — пробую следующий URL", u, e)
+    logger.error("Все попытки скачать %s провалились: %s", urls[0], last_err)
+    return False
 
 
 def _append_metadata(folder: str, entry: dict) -> None:
@@ -380,7 +386,12 @@ def fetch_wikimedia(query, media_type, limit, root, control=_NULL_CONTROL):
             filename = f"wm_{_safe_name(title)}.{ext}"
             dest = os.path.join(folder, filename)
 
-            if _download_file(file_url, dest):
+            # File:Foo bar.jpg → Special:FilePath/Foo bar.jpg (резервный путь, обходит 403 на upload.wikimedia.org)
+            bare_name = title.split(":", 1)[-1]
+            fallback_url = f"https://commons.wikimedia.org/wiki/Special:FilePath/{quote(bare_name)}"
+            urls = [file_url, fallback_url]
+
+            if _download_file(urls, dest):
                 _append_metadata(folder, {
                     "filename": filename, "source": "Wikimedia Commons", "id": title,
                     "license": license_short, "credit": artist,
